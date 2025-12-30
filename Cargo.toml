@@ -1,0 +1,17 @@
+[package]
+name = "libsync3"
+authors = ["Bruno Chenoll <brunochenoll@gmail.com>"]
+version = "0.1.0"
+edition = "2024"
+license = "MIT or Apache-2.0"
+description = "Simple librsync implementation for Rust but using BLAKE3 instead of BLAKE2b"
+homepage = "https://github.com/Bechma/libsync3"
+repository = "https://github.com/Bechma/libsync3"
+keywords = ["blake3", "delta", "patch", "sync", "signature"]
+readme = "README.md"
+
+[dependencies]
+blake3 = "1.8.2"
+
+[dev-dependencies]
+proptest = "1.9.0"
