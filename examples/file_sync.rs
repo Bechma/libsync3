@@ -36,9 +36,7 @@ fn main() -> io::Result<()> {
     println!("Delta contains {} operations", diff.ops.len());
 
     // 4. Apply delta to old file to create the patched file
-    println!(
-        "Applying delta to reconstruct new content at {patched_path}"
-    );
+    println!("Applying delta to reconstruct new content at {patched_path}");
     // Note: 'apply' needs the original file to be seekable to read matching chunks
     old_file.seek(SeekFrom::Start(0))?;
     let mut patched_file = File::create(patched_path)?;
