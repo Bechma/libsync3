@@ -1,4 +1,4 @@
-use libsync3::{apply_to_vec, delta, signature, signature_with_chunk_size, DeltaOp};
+use libsync3::{DeltaOp, apply_to_vec, delta, signature, signature_with_chunk_size};
 use proptest::prelude::*;
 use std::io::Cursor;
 
@@ -91,6 +91,7 @@ proptest! {
         base in prop::collection::vec(any::<u8>(), 100..50_000),
         keep_ratio in 0.1f64..0.9,
     ) {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let keep_len = ((base.len() as f64) * keep_ratio) as usize;
         let modified: Vec<u8> = base[..keep_len].to_vec();
 

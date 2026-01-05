@@ -1,0 +1,5 @@
+[profile.test]
+opt-level = 3
+
+[alias]
+test-release = "test --release"

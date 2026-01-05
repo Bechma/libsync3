@@ -2,6 +2,17 @@
 //!
 //! This library allows you to efficiently synchronize files by calculating the differences (delta) between two versions of a file and applying those differences to update the old version.
 //!
+//! ## Features
+//!
+//! - **BLAKE3 hashing**: Cryptographically strong 256-bit hashes for maximum reliability
+//! - **Lightweight Buzhash** (optional): Fast 64-bit rolling hashes for performance-critical scenarios
+//! - **Serde support** (optional): Serialization/deserialization for all data types
+//! - **Chunking**: Configurable chunk sizes for optimal performance
+//!
+//! ## Examples
+//!
+//! ### Using BLAKE3 (default, cryptographically strong)
+//!
 //! ```
 //! use std::io::Cursor;
 //! use libsync3::{signature, delta, apply, apply_to_vec};
@@ -29,43 +40,92 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ### Using Lightweight Buzhash (fast, 64-bit)
+//!
+//! This functionality is available when the `buzhash` feature is enabled.
+//!
+//! ```ignore
+//! use std::io::Cursor;
+//! use libsync3::{lightweight_signature, lightweight_delta, apply, apply_to_vec};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let old_data = b"Hello World";
+//!     let new_data = b"Hello Rust World";
+//!
+//!     // 1. Generate lightweight signature of the old data
+//!     let sig = lightweight_signature(Cursor::new(old_data))?;
+//!
+//!     // 2. Compute delta between new data and the signature
+//!     let diff = lightweight_delta(Cursor::new(new_data), &sig)?;
+//!
+//!     // 3. Apply delta to old data to get new data
+//!     let result = apply_to_vec(Cursor::new(old_data), &diff)?;
+//!
+//!     assert_eq!(result, new_data);
+//!
+//!     Ok(())
+//! }
+//! ```
 use blake3::Hash;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-const DEFAULT_CHUNK_SIZE: usize = 4096;
+#[cfg(feature = "buzhash")]
+mod buzhash;
+
+#[cfg(feature = "buzhash")]
+pub use buzhash::{
+    BuzHash, LightweightChunkSignature, LightweightHash, LightweightSignature, hash64,
+    lightweight_delta, lightweight_signature, lightweight_signature_with_chunk_size,
+};
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Signature {
     pub chunk_size: usize,
     pub chunks: Vec<ChunkSignature>,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChunkSignature {
     pub index: usize,
     pub hash: Hash,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DeltaOp {
     Copy(usize),
     Insert(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Delta {
     pub chunk_size: usize,
     pub ops: Vec<DeltaOp>,
     pub final_size: usize,
 }
 
+/// Default chunk size for signatures (4096 bytes)
+pub const DEFAULT_CHUNK_SIZE: usize = 4096;
+
 /// Creates a BLAKE3 signature from a reader by using `DEFAULT_CHUNK_SIZE`.
+///
+/// # Errors
+///
+/// Returns an error if reading from the reader fails.
 pub fn signature<R: Read>(reader: R) -> io::Result<Signature> {
     signature_with_chunk_size(reader, DEFAULT_CHUNK_SIZE)
 }
 
 /// Creates a BLAKE3 signature from a reader by using a custom chunk size.
+///
+/// # Errors
+///
+/// Returns an error if reading from the reader fails.
 pub fn signature_with_chunk_size<R: Read>(
     mut reader: R,
     chunk_size: usize,
@@ -90,7 +150,13 @@ pub fn signature_with_chunk_size<R: Read>(
     Ok(Signature { chunk_size, chunks })
 }
 
+const TARGET_BATCH_SIZE: usize = 256 * 1024;
+
 /// Computes a delta between new data (from reader) and an existing signature.
+///
+/// # Errors
+///
+/// Returns an error if reading from the reader fails.
 pub fn delta<R: Read>(mut new_data: R, sig: &Signature) -> io::Result<Delta> {
     let mut hash_to_index: HashMap<Hash, usize> = HashMap::with_capacity(sig.chunks.len());
     hash_to_index.extend(sig.chunks.iter().map(|chunk| (&chunk.hash, &chunk.index)));
@@ -109,9 +175,7 @@ pub fn delta<R: Read>(mut new_data: R, sig: &Signature) -> io::Result<Delta> {
 
     // Use a larger buffer to reduce I/O calls
     // Target a buffer size of around 64KB to 256KB for efficiency
-    const TARGET_BATCH_SIZE: usize = 256 * 1024;
-    
-    let batch_size = if chunk_size >= TARGET_BATCH_SIZE {
+    let batch_size = if chunk_size >= 256 * 1024 {
         chunk_size
     } else {
         // Find the largest multiple of chunk_size that fits in TARGET_BATCH_SIZE
@@ -135,30 +199,30 @@ pub fn delta<R: Read>(mut new_data: R, sig: &Signature) -> io::Result<Delta> {
 
         total_size += bytes_read;
         let valid_buffer = &buffer[..bytes_read];
-        
+
         // Iterate over chunks
         let mut literal_start = 0;
         for (i, chunk) in valid_buffer.chunks(chunk_size).enumerate() {
             let hash = blake3::hash(chunk);
-            
+
             if let Some(&index) = hash_to_index.get(&hash) {
                 let chunk_offset = i * chunk_size;
-                
+
                 // Append pending literal data from the current buffer before this chunk
                 if chunk_offset > literal_start {
                     pending_literal.extend_from_slice(&valid_buffer[literal_start..chunk_offset]);
                 }
-                
+
                 // Flush pending_literal
                 if !pending_literal.is_empty() {
                     ops.push(DeltaOp::Insert(std::mem::take(&mut pending_literal)));
                 }
-                
+
                 ops.push(DeltaOp::Copy(index));
                 literal_start = chunk_offset + chunk.len();
             }
         }
-        
+
         // Append remaining data in buffer to pending_literal
         if literal_start < valid_buffer.len() {
             pending_literal.extend_from_slice(&valid_buffer[literal_start..]);
@@ -177,7 +241,11 @@ pub fn delta<R: Read>(mut new_data: R, sig: &Signature) -> io::Result<Delta> {
     })
 }
 
-/// Applies a delta to old_data (from seekable reader) and writes to output.
+/// Applies a delta to `old_data` (from seekable reader) and writes to output.
+///
+/// # Errors
+///
+/// Returns an error if reading from `old_data` or writing to `output` fails.
 pub fn apply<R, W>(mut old_data: R, dlt: &Delta, mut output: W) -> io::Result<()>
 where
     R: Read + Seek,
@@ -204,7 +272,11 @@ where
     Ok(())
 }
 
-/// Convenience: apply delta and return Vec<u8>.
+/// Convenience: apply delta and return `Vec<u8>`.
+///
+/// # Errors
+///
+/// Returns an error if reading from `original` fails.
 pub fn apply_to_vec<R: Read + Seek>(original: R, delta: &Delta) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(delta.final_size);
     apply(original, delta, &mut output)?;
@@ -212,26 +284,26 @@ pub fn apply_to_vec<R: Read + Seek>(original: R, delta: &Delta) -> io::Result<Ve
 }
 
 /// Reads up to `buf.len()` bytes, returns actual count (0 on EOF).
-fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+pub(crate) fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
         match reader.read(&mut buf[total..]) {
             Ok(0) => break,
             Ok(n) => total += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
         }
     }
     Ok(total)
 }
 
-#[must_use] 
+#[must_use]
 pub fn suggest_chunk_size(file_size: usize) -> usize {
     match file_size {
-        0..=65_536 => 512,           // <64KB: small chunks
-        65_537..=1_048_576 => DEFAULT_CHUNK_SIZE,  // 64KB-1MB: default
-        1_048_577..=104_857_600 => 8192, // 1MB-100MB
-        _ => 16384,                  // >100MB
+        0..=65_536 => 512,                        // <64KB: small chunks
+        65_537..=1_048_576 => DEFAULT_CHUNK_SIZE, // 64KB-1MB: default
+        1_048_577..=104_857_600 => 8192,          // 1MB-100MB
+        _ => 16384,                               // >100MB
     }
 }
 

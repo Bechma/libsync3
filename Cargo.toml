@@ -11,7 +11,29 @@ keywords = ["blake3", "delta", "patch", "sync", "signature"]
 readme = "README.md"
 
 [dependencies]
-blake3 = "1.8.2"
+blake3 = { version = "1.8.2" }
+serde = { version = "1.0", features = ["derive"], optional = true }
 
 [dev-dependencies]
 proptest = "1.9.0"
+serde_json = "1.0"
+
+[features]
+default = []
+serde = ["dep:serde", "blake3/serde"]
+buzhash = []
+
+[[example]]
+name = "buzhash_basic"
+required-features = ["buzhash"]
+
+[[example]]
+name = "buzhash_rolling"
+required-features = ["buzhash"]
+
+[[example]]
+name = "buzhash_comparison"
+required-features = ["buzhash"]
+
+[lints.clippy]
+pedantic = "warn"

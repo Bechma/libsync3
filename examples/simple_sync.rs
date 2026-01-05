@@ -1,5 +1,5 @@
+use libsync3::{apply_to_vec, delta, signature};
 use std::io::Cursor;
-use libsync3::{signature, delta, apply_to_vec};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Setup initial data (old version) and modified data (new version)
@@ -22,8 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Apply delta
     // The receiver applies the delta to their old_data to reconstruct new_data.
     let reconstructed = apply_to_vec(Cursor::new(old_data), &d)?;
-    
-    println!("Reconstructed: {:?}", String::from_utf8_lossy(&reconstructed));
+
+    println!(
+        "Reconstructed: {:?}",
+        String::from_utf8_lossy(&reconstructed)
+    );
 
     // Verify
     assert_eq!(reconstructed, new_data);
