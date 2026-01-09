@@ -1,36 +1,30 @@
-use libsync3::{apply_to_vec, delta, signature};
-use std::io::Cursor;
+use libsync3::{BufferRsync, RsyncConfig};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Setup initial data (old version) and modified data (new version)
-    let old_data = b"Hello, world! This is the original version of the file.";
-    let new_data = b"Hello, Rust! This is the modified version of the file.";
+fn main() {
+    let rsync = BufferRsync::new(RsyncConfig::default());
 
-    println!("Original: {:?}", String::from_utf8_lossy(old_data));
-    println!("Modified: {:?}", String::from_utf8_lossy(new_data));
+    // Original data (simulating "old" file)
+    let original = b"Hello, world! This is the original content of the file.";
 
-    // 2. Generate signature for the old data
-    // In a real networked scenario, the receiver (who has old_data) would send this signature to the sender.
-    let sig = signature(Cursor::new(old_data))?;
-    println!("Generated signature with {} chunks", sig.chunks.len());
+    // Modified data (simulating "new" file with some changes)
+    let modified = b"Hello, Rust! This is the modified content of the file.";
 
-    // 3. Compute delta
-    // The sender (who has new_data) uses the signature to compute the difference.
-    let d = delta(Cursor::new(new_data), &sig)?;
-    println!("Computed delta with {} operations", d.ops.len());
+    println!("Original: {:?}", String::from_utf8_lossy(original));
+    println!("Modified: {:?}", String::from_utf8_lossy(modified));
 
-    // 4. Apply delta
-    // The receiver applies the delta to their old_data to reconstruct new_data.
-    let reconstructed = apply_to_vec(Cursor::new(old_data), &d)?;
+    // Step 1: Generate signatures from the original data
+    let signatures = rsync.generate_signatures(&original[..]).unwrap();
+    println!("\nGenerated {} signature entries", signatures.len());
 
-    println!(
-        "Reconstructed: {:?}",
-        String::from_utf8_lossy(&reconstructed)
-    );
+    // Step 2: Generate delta by comparing modified data against signatures
+    let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
+    println!("Generated {} delta commands", delta.len());
 
-    // Verify
-    assert_eq!(reconstructed, new_data);
-    println!("Success! Reconstructed data matches modified data.");
+    // Step 3: Apply delta to original data to reconstruct modified data
+    let reconstructed = rsync.apply_delta(original, &delta);
 
-    Ok(())
+    // Verify the result
+    assert_eq!(reconstructed, modified);
+    println!("\nReconstructed: {:?}", String::from_utf8_lossy(&reconstructed));
+    println!("Success! Original + Delta = Modified");
 }

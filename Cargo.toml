@@ -1,39 +1,26 @@
 [package]
 name = "libsync3"
 authors = ["Bruno Chenoll <brunochenoll@gmail.com>"]
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
 license = "MIT or Apache-2.0"
-description = "Simple librsync implementation for Rust but using BLAKE3 instead of BLAKE2b"
+description = "Simple librsync implementation for Rust using xxhash3 instead of BLAKE2b"
 homepage = "https://github.com/Bechma/libsync3"
 repository = "https://github.com/Bechma/libsync3"
-keywords = ["blake3", "delta", "patch", "sync", "signature"]
+keywords = ["xxhash3", "delta", "patch", "sync", "signature"]
 readme = "README.md"
 
+[[bench]]
+name = "comparison"
+harness = false
+
 [dependencies]
-blake3 = { version = "1.8.2" }
-serde = { version = "1.0", features = ["derive"], optional = true }
+rayon = "1.11.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
-proptest = "1.9.0"
-serde_json = "1.0"
-
-[features]
-default = []
-serde = ["dep:serde", "blake3/serde"]
-buzhash = []
-
-[[example]]
-name = "buzhash_basic"
-required-features = ["buzhash"]
-
-[[example]]
-name = "buzhash_rolling"
-required-features = ["buzhash"]
-
-[[example]]
-name = "buzhash_comparison"
-required-features = ["buzhash"]
+librsync = "0.2.5"
+criterion = "0.8.1"
 
 [lints.clippy]
 pedantic = "warn"

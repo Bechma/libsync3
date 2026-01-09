@@ -1,105 +1,78 @@
 # libsync3
 
-A simple, pure Rust implementation of the rsync algorithm using BLAKE3 for hashing.
+A simple, pure Rust implementation of the rsync algorithm using xxhash3 for hashing.
 
-This library allows you to efficiently synchronize files by calculating the differences (delta) between two versions of a file and applying those differences to update the old version.
+This library allows you to efficiently synchronize files by calculating the differences (delta) between two versions of
+a file and applying those differences to update the old version.
 
 ## Features
 
-- **BLAKE3 Hashing**: Uses the fast and secure BLAKE3 hash function.
-- **Pure Rust**: No external C dependencies (other than what `blake3` might need, which is usually minimal/optional).
-- **Efficient**: Optimized delta calculation with buffered I/O and minimized memory allocations.
-- **BuzHash**: Optional rolling checksum support for content-defined chunking (enable with `buzhash` feature).
-- **Simple API**: Easy to use functions for signature generation, delta calculation, and patching.
+- **xxhash3 Hashing**: Uses the extremely fast xxhash3 hash function for both rolling and strong checksums.
+- **Pure Rust**: No external C dependencies.
+- **Parallel Processing**: Uses rayon for parallel signature generation.
+- **Simple API**: Easy to use `BufferRsync` struct for signature generation, delta calculation, and patching.
 
 ## Usage
 
 Here is a quick example of how to use the library:
 
 ```rust
-use std::io::Cursor;
-use libsync3::{signature, delta, apply, apply_to_vec};
+use libsync3::{BufferRsync, RsyncConfig};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let old_data = b"Hello World";
-    let new_data = b"Hello Rust World";
+fn main() {
+    let rsync = BufferRsync::new(RsyncConfig::default());
 
-    // 1. Generate signature of the old data
-    let sig = signature(Cursor::new(old_data))?;
+    let original = b"Hello, world! This is the original content.";
+    let modified = b"Hello, Rust! This is the modified content.";
 
-    // 2. Compute delta between new data and the signature
-    let diff = delta(Cursor::new(new_data), &sig)?;
+    // 1. Generate signatures from the original data
+    let signatures = rsync.generate_signatures(&original[..]).unwrap();
 
-    // 3. Apply delta to old data to get new data
-    let result = apply_to_vec(Cursor::new(old_data), &diff)?;
+    // 2. Generate delta by comparing modified data against signatures
+    let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
 
-    assert_eq!(result, new_data);
-    
-    // Optionally:
-    let mut output = Vec::with_capacity(diff.final_size);
-    apply(Cursor::new(old_data), &diff, &mut output)?;
-    assert_eq!(output, new_data);
-    
-    Ok(())
+    // 3. Apply delta to original data to reconstruct modified data
+    let reconstructed = rsync.apply_delta(original, &delta);
+
+    assert_eq!(reconstructed, modified);
 }
 ```
 
-### Using Lightweight Buzhash (fast, 64-bit)
+## Benchmarks
 
-This functionality is available when the `buzhash` feature is enabled.
+Performance comparison between libsync3 (xxhash3) and librsync (end-to-end: delta generation + patch application):
 
-```rust
-use std::io::Cursor;
-use libsync3::{lightweight_signature, lightweight_delta, apply, apply_to_vec};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let old_data = b"Hello World";
-    let new_data = b"Hello Rust World";
-
-    // 1. Generate lightweight signature of the old data
-    let sig = lightweight_signature(Cursor::new(old_data))?;
-
-    // 2. Compute delta between new data and the signature
-    let diff = lightweight_delta(Cursor::new(new_data), &sig)?;
-
-    // 3. Apply delta to old data to get new data
-    let result = apply_to_vec(Cursor::new(old_data), &diff)?;
-
-    assert_eq!(result, new_data);
-
-    Ok(())
-}
+```bash
+cargo bench
 ```
+
+| Data Size | libsync3 (xxhash3) | librsync | Speedup |
+|-----------|--------------------|----------|---------|
+| 1 KB      | 113 ns             | 1.78 µs  | ~16x    |
+| 5 KB      | 722 ns             | 26.1 µs  | ~36x    |
+| 10 KB     | 1.21 µs            | 49.4 µs  | ~41x    |
+| 50 KB     | 5.00 µs            | 618 µs   | ~124x   |
+| 100 KB    | 10.8 µs            | 1.25 ms  | ~116x   |
+| 1 MB      | 648 µs             | 11.4 ms  | ~18x    |
 
 ## Examples
 
 The `examples/` directory contains complete working examples:
 
 - **simple_sync**: Demonstrates basic in-memory synchronization.
-- **file_sync**: Demonstrates how to synchronize actual files on disk.
-- **buzhash_basic**: Demonstrates basic usage of the BuzHash rolling checksum.
-- **buzhash_rolling**: Shows how to use the rolling hash for sliding windows.
-- **buzhash_comparison**: Compares standard fixed-size blocks vs BuzHash.
 
 To run the examples:
 
 ```bash
-# Run the simple in-memory example
 cargo run --example simple_sync
-
-# Run the file synchronization example
-cargo run --example file_sync
-
-# Run the BuzHash examples (requires buzhash feature)
-cargo run --example buzhash_basic --features buzhash
 ```
 
 ## Testing
 
-To run the test suite, including property-based tests:
+To run the test suite:
 
 ```bash
-cargo test --release
+cargo test
 ```
 
 ## License
