@@ -32,7 +32,8 @@ fn main() {
     let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
 
     // 3. Apply delta to original data to reconstruct modified data
-    let reconstructed = rsync.apply_delta(original, &delta);
+    let mut reconstructed = Vec::new();
+    rsync.apply_delta(std::io::Cursor::new(original), &delta, &mut reconstructed).unwrap();
 
     assert_eq!(reconstructed, modified);
 }
@@ -42,18 +43,20 @@ fn main() {
 
 Performance comparison between libsync3 (xxhash3) and librsync (end-to-end: delta generation + patch application):
 
+Done in an AMD Ryzen 9 7900X.
+
 ```bash
 cargo bench
 ```
 
 | Data Size | libsync3 (xxhash3) | librsync | Speedup |
 |-----------|--------------------|----------|---------|
-| 1 KB      | 113 ns             | 1.78 µs  | ~16x    |
-| 5 KB      | 722 ns             | 26.1 µs  | ~36x    |
-| 10 KB     | 1.21 µs            | 49.4 µs  | ~41x    |
-| 50 KB     | 5.00 µs            | 618 µs   | ~124x   |
-| 100 KB    | 10.8 µs            | 1.25 ms  | ~116x   |
-| 1 MB      | 648 µs             | 11.4 ms  | ~18x    |
+| 1 KB      | 182.25 ns          | 1.73 µs  | ~10x    |
+| 5 KB      | 420.98 ns          | 26.6 µs  | ~63x    |
+| 10 KB     | 720.02 ns          | 49.2 µs  | ~68x    |
+| 50 KB     | 3.39 µs            | 626.8 µs | ~185x   |
+| 100 KB    | 7.21 µs            | 1.25 ms  | ~173x   |
+| 1 MB      | 326.21 µs          | 11.5 ms  | ~35x    |
 
 ## Examples
 

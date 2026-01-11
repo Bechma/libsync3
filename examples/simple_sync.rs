@@ -1,4 +1,5 @@
 use libsync3::{BufferRsync, RsyncConfig};
+use std::io::Cursor;
 
 fn main() {
     let rsync = BufferRsync::new(RsyncConfig::default());
@@ -21,7 +22,8 @@ fn main() {
     println!("Generated {} delta commands", delta.len());
 
     // Step 3: Apply delta to original data to reconstruct modified data
-    let reconstructed = rsync.apply_delta(original, &delta);
+    let mut reconstructed = Vec::new();
+    rsync.apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
 
     // Verify the result
     assert_eq!(reconstructed, modified);

@@ -1,8 +1,27 @@
-use rayon::prelude::*;
 use std::collections::HashMap;
-use std::io::Read;
-use xxhash_rust::xxh3::xxh3_64;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use twox_hash::XxHash3_128;
 
+/// Reads exactly `buf.len()` bytes or until EOF, returning the number of bytes read.
+fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
+#[inline]
+fn xxh3_128(chunk: &[u8]) -> u128 {
+    XxHash3_128::oneshot(chunk)
+}
+
+#[derive(Copy, Clone)]
 pub struct RsyncConfig {
     pub block_size: usize,
 }
@@ -13,20 +32,16 @@ impl Default for RsyncConfig {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct BlockSignature {
-    pub strong_hash: u64,
-    pub block_index: usize,
-}
+pub type Signatures = HashMap<u128, usize>;
 
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DeltaCommand {
-    Data(std::sync::Arc<[u8]>),
+    Data(Vec<u8>),
     Copy { offset: usize, length: usize },
 }
 
-pub type Signatures = HashMap<u64, Vec<BlockSignature>>;
-
+#[derive(Default, Copy, Clone)]
 pub struct BufferRsync {
     config: RsyncConfig,
 }
@@ -42,28 +57,19 @@ impl BufferRsync {
     /// # Errors
     /// Returns an error if reading from the reader fails.
     pub fn generate_signatures<R: Read>(&self, mut reader: R) -> std::io::Result<Signatures> {
-        let mut data = Vec::new();
-        reader.read_to_end(&mut data)?;
+        let mut signatures: Signatures = HashMap::new();
+        let mut buffer = vec![0u8; self.config.block_size];
 
-        let chunks: Vec<&[u8]> = data.chunks(self.config.block_size).collect();
+        for block_index in 0.. {
+            let bytes_read = read_exact_or_eof(&mut reader, &mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
 
-        let signatures: Signatures = chunks
-            .par_iter()
-            .enumerate()
-            .fold(HashMap::new, |mut acc: Signatures, (i, chunk)| {
-                let hash = xxh3_64(chunk);
-                acc.entry(hash).or_default().push(BlockSignature {
-                    strong_hash: xxh3_64(chunk),
-                    block_index: i,
-                });
-                acc
-            })
-            .reduce(HashMap::new, |mut acc: Signatures, mut other| {
-                for (key, vals) in other.drain() {
-                    acc.entry(key).or_default().extend(vals);
-                }
-                acc
-            });
+            let chunk = &buffer[..bytes_read];
+            let hash = xxh3_128(chunk);
+            signatures.entry(hash).or_insert(block_index);
+        }
 
         Ok(signatures)
     }
@@ -77,118 +83,69 @@ impl BufferRsync {
         old_signatures: &Signatures,
         mut reader: R,
     ) -> std::io::Result<Vec<DeltaCommand>> {
-        let mut new_data = Vec::new();
-        reader.read_to_end(&mut new_data)?;
+        let mut delta = Vec::new();
+        let mut buffer = vec![0u8; self.config.block_size];
 
-        Ok(self.generate_delta_from_slice(old_signatures, &new_data))
-    }
-
-    #[must_use]
-    pub fn generate_delta_from_slice(
-        &self,
-        old_signatures: &Signatures,
-        new_data: &[u8],
-    ) -> Vec<DeltaCommand> {
-        let mut delta = Vec::with_capacity(new_data.len() / self.config.block_size + 1);
-        let block_size = self.config.block_size;
-        let data_len = new_data.len();
-
-        if data_len < block_size {
-            let hash = xxh3_64(new_data);
-            if let Some(matched) = old_signatures.get(&hash)
-                && let Some(sig) = matched.iter().find(|s| s.strong_hash == hash)
-            {
-                return vec![DeltaCommand::Copy {
-                    offset: sig.block_index,
-                    length: data_len,
-                }];
-            }
-            return vec![DeltaCommand::Data(new_data.into())];
-        }
-
-        let mut i = 0;
-        while i + block_size <= data_len {
-            let window = &new_data[i..i + block_size];
-            let hash = xxh3_64(window);
-
-            if let Some(matched) = old_signatures.get(&hash)
-                && let Some(sig) = matched.iter().find(|s| s.strong_hash == hash)
-            {
-                delta.push(DeltaCommand::Copy {
-                    offset: sig.block_index,
-                    length: block_size,
-                });
-                i += block_size;
-                continue;
+        loop {
+            let bytes_read = read_exact_or_eof(&mut reader, &mut buffer)?;
+            if bytes_read == 0 {
+                break;
             }
 
-            delta.push(DeltaCommand::Data(window.into()));
-            i += block_size;
-        }
+            let chunk = &buffer[..bytes_read];
+            let hash = xxh3_128(chunk);
 
-        if i < data_len {
-            let window = &new_data[i..];
-            let hash = xxh3_64(window);
-            if let Some(matched) = old_signatures.get(&hash)
-                && let Some(sig) = matched.iter().find(|s| s.strong_hash == hash)
-            {
+            if let Some(&matched) = old_signatures.get(&hash) {
                 delta.push(DeltaCommand::Copy {
-                    offset: sig.block_index,
-                    length: data_len - i,
+                    offset: matched,
+                    length: bytes_read,
                 });
             } else {
-                delta.push(DeltaCommand::Data(window.into()));
+                delta.push(DeltaCommand::Data(chunk.into()));
             }
         }
 
-        delta
+        Ok(delta)
     }
 
-    /// # Panics
-    /// Panics if the delta contains invalid copy commands (out of bounds or overflow).
-    #[must_use]
-    pub fn apply_delta(&self, base_data: &[u8], delta: &[DeltaCommand]) -> Vec<u8> {
-        let mut result = Vec::with_capacity(
-            base_data.len()
-                + delta
-                    .iter()
-                    .filter_map(|d| {
-                        if let DeltaCommand::Data(data) = d {
-                            Some(data.len())
-                        } else {
-                            None
-                        }
-                    })
-                    .sum::<usize>(),
-        );
+    /// # Errors
+    /// Returns an error if the delta contains invalid copy commands (out of bounds or overflow) or if IO operations fail.
+    pub fn apply_delta<R: Read + Seek, W: Write>(
+        &self,
+        mut base_reader: R,
+        delta: &[DeltaCommand],
+        target_writer: W,
+    ) -> std::io::Result<()> {
+        const BUF_SIZE: usize = 64 * 1024;
+        let mut writer = BufWriter::with_capacity(BUF_SIZE, target_writer);
+        let mut current_pos: u64 = 0;
 
         for command in delta {
             match command {
-                DeltaCommand::Data(data) => result.extend_from_slice(data),
+                DeltaCommand::Data(data) => {
+                    writer.write_all(data)?;
+                }
                 DeltaCommand::Copy { offset, length } => {
-                    let start = *offset * self.config.block_size;
-                    let end = start
-                        .checked_add(*length)
-                        .expect("delta copy range overflowed usize");
-                    assert!(
-                        end <= base_data.len(),
-                        "delta copy range out of bounds (offset {}, length {}, base length {})",
-                        start,
-                        length,
-                        base_data.len()
-                    );
-                    result.extend_from_slice(&base_data[start..end]);
+                    let start = (*offset * self.config.block_size) as u64;
+
+                    if start != current_pos {
+                        base_reader.seek(SeekFrom::Start(start))?;
+                    }
+
+                    let len = *length as u64;
+                    std::io::copy(&mut (&mut base_reader).take(len), &mut writer)?;
+                    current_pos = start + len;
                 }
             }
         }
-
-        result
+        writer.flush()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_basic_rsync() {
@@ -199,7 +156,11 @@ mod tests {
 
         let signatures = rsync.generate_signatures(&original[..]).unwrap();
         let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-        let reconstructed = rsync.apply_delta(original, &delta);
+
+        let mut reconstructed = Vec::new();
+        rsync
+            .apply_delta(Cursor::new(original), &delta, &mut reconstructed)
+            .unwrap();
 
         assert_eq!(reconstructed, modified);
     }
@@ -213,7 +174,11 @@ mod tests {
 
         let signatures = rsync.generate_signatures(&original[..]).unwrap();
         let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-        let reconstructed = rsync.apply_delta(original, &delta);
+
+        let mut reconstructed = Vec::new();
+        rsync
+            .apply_delta(Cursor::new(original), &delta, &mut reconstructed)
+            .unwrap();
 
         assert_eq!(reconstructed, modified);
     }
@@ -226,7 +191,11 @@ mod tests {
 
         let signatures = rsync.generate_signatures(&data[..]).unwrap();
         let delta = rsync.generate_delta(&signatures, &data[..]).unwrap();
-        let reconstructed = rsync.apply_delta(data, &delta);
+
+        let mut reconstructed = Vec::new();
+        rsync
+            .apply_delta(Cursor::new(data), &delta, &mut reconstructed)
+            .unwrap();
 
         assert_eq!(reconstructed, data);
     }
@@ -240,7 +209,11 @@ mod tests {
 
         let signatures = rsync.generate_signatures(&original[..]).unwrap();
         let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-        let reconstructed = rsync.apply_delta(original, &delta);
+
+        let mut reconstructed = Vec::new();
+        rsync
+            .apply_delta(Cursor::new(original), &delta, &mut reconstructed)
+            .unwrap();
 
         assert_eq!(reconstructed, modified);
     }

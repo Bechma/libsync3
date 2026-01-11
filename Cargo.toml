@@ -15,8 +15,11 @@ name = "comparison"
 harness = false
 
 [dependencies]
-rayon = "1.11.0"
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+twox-hash = { version = "2.1.2", features = ["xxhash3_128", "std"], default-features = false }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde"]
 
 [dev-dependencies]
 librsync = "0.2.5"

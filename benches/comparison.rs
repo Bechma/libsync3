@@ -21,7 +21,11 @@ fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
 
         let block_start = size / 3;
         let block_size = size.min(500);
-        for byte in modified.iter_mut().take((block_start + block_size).min(size)).skip(block_start) {
+        for byte in modified
+            .iter_mut()
+            .take((block_start + block_size).min(size))
+            .skip(block_start)
+        {
             *byte = 0xFF;
         }
 
@@ -126,7 +130,13 @@ fn benchmark_patch_application(c: &mut Criterion) {
                     let delta = rsync.generate_delta(&sigs, &modified[..]).unwrap();
                     (original.clone(), delta)
                 },
-                |(base, delta)| rsync.apply_delta(&base, &delta),
+                |(base, delta)| {
+                    let mut result = Vec::new();
+                    rsync
+                        .apply_delta(Cursor::new(&base), &delta, &mut result)
+                        .unwrap();
+                    result
+                },
                 criterion::BatchSize::LargeInput,
             );
         });
@@ -173,7 +183,11 @@ fn benchmark_end_to_end(c: &mut Criterion) {
                 |(base, modified)| {
                     let signatures = rsync.generate_signatures(&base[..]).unwrap();
                     let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-                    rsync.apply_delta(&base, &delta)
+                    let mut result = Vec::new();
+                    rsync
+                        .apply_delta(Cursor::new(&base), &delta, &mut result)
+                        .unwrap();
+                    result
                 },
                 criterion::BatchSize::LargeInput,
             );
@@ -206,63 +220,12 @@ fn benchmark_end_to_end(c: &mut Criterion) {
     group.finish();
 }
 
-fn benchmark_1to1_comparison(c: &mut Criterion) {
-    let sizes = vec![1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000];
-    let mut group = c.benchmark_group("1to1_comparison");
-
-    for size in sizes {
-        let (original, modified) = generate_test_data(size);
-        let rsync = BufferRsync::new(RsyncConfig::default());
-
-        group.bench_with_input(BenchmarkId::new("xxhash3", size), &size, |b, _| {
-            b.iter_batched(
-                || {
-                    let signatures = rsync.generate_signatures(&original[..]).unwrap();
-                    (signatures, original.clone(), modified.clone())
-                },
-                |(signatures, original, modified)| {
-                    let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-                    rsync.apply_delta(&original, &delta)
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
-
-        group.bench_with_input(BenchmarkId::new("librsync", size), &size, |b, _| {
-            b.iter_batched(
-                || {
-                    let mut sig = Vec::new();
-                    let mut cursor = Cursor::new(&original);
-                    whole_signature(&mut cursor, &mut sig).unwrap();
-                    (sig, original.clone(), modified.clone())
-                },
-                |(sig, original, modified)| {
-                    let mut delta = Vec::new();
-                    let mut new_cursor = Cursor::new(&modified);
-                    let mut sig_cursor = Cursor::new(&sig);
-                    whole_delta(&mut new_cursor, &mut sig_cursor, &mut delta).unwrap();
-
-                    let mut result = Vec::new();
-                    let mut base_cursor = Cursor::new(&original);
-                    let mut delta_cursor = Cursor::new(&delta);
-                    whole_patch(&mut base_cursor, &mut delta_cursor, &mut result).unwrap();
-                    result
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
-    }
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     benchmark_signature_generation,
     benchmark_delta_generation,
     benchmark_patch_application,
     benchmark_end_to_end,
-    benchmark_1to1_comparison,
 );
 
 criterion_main!(benches);

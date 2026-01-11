@@ -45,7 +45,8 @@ fn verify_correctness() {
 
     let signatures = rsync.generate_signatures(&original[..]).unwrap();
     let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
-    let result = rsync.apply_delta(&original, &delta);
+    let mut result = Vec::new();
+    rsync.apply_delta(Cursor::new(&original), &delta, &mut result).unwrap();
 
     let mut sig = Vec::new();
     let mut sig_cursor = Cursor::new(&original);
