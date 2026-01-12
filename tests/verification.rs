@@ -1,5 +1,5 @@
 use std::io::Cursor;
-use libsync3::{BufferRsync, RsyncConfig};
+use libsync3::{apply_delta, generate_delta, generate_signatures};
 use librsync::whole::{delta as whole_delta, patch as whole_patch, signature as whole_signature};
 
 fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
@@ -41,12 +41,11 @@ fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn verify_correctness() {
     let (original, modified) = generate_test_data(50_000);
-    let rsync = BufferRsync::new(RsyncConfig::default());
 
-    let signatures = rsync.generate_signatures(&original[..]).unwrap();
-    let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
+    let signatures = generate_signatures(&original[..]).unwrap();
+    let delta = generate_delta(&signatures, &modified[..]).unwrap();
     let mut result = Vec::new();
-    rsync.apply_delta(Cursor::new(&original), &delta, &mut result).unwrap();
+    apply_delta(Cursor::new(&original), &delta, &mut result).unwrap();
 
     let mut sig = Vec::new();
     let mut sig_cursor = Cursor::new(&original);

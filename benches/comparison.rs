@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use librsync::whole::{delta as whole_delta, patch as whole_patch, signature as whole_signature};
-use libsync3::{BufferRsync, RsyncConfig};
+use libsync3::{apply_delta, generate_delta, generate_signatures};
 use std::io::Cursor;
 
 fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
@@ -49,12 +49,11 @@ fn benchmark_signature_generation(c: &mut Criterion) {
 
     for size in sizes {
         let (original, _) = generate_test_data(size);
-        let rsync = BufferRsync::new(RsyncConfig::default());
 
         group.bench_with_input(BenchmarkId::new("xxhash3", size), &size, |b, _| {
             b.iter_batched(
                 || original.clone(),
-                |data| rsync.generate_signatures(&data[..]).unwrap(),
+                |data| generate_signatures(&data[..]).unwrap(),
                 criterion::BatchSize::LargeInput,
             );
         });
@@ -82,8 +81,7 @@ fn benchmark_delta_generation(c: &mut Criterion) {
 
     for size in sizes {
         let (original, modified) = generate_test_data(size);
-        let rsync = BufferRsync::new(RsyncConfig::default());
-        let signatures = rsync.generate_signatures(&original[..]).unwrap();
+        let signatures = generate_signatures(&original[..]).unwrap();
 
         let mut sig = Vec::new();
         let mut cursor = Cursor::new(&original);
@@ -92,7 +90,7 @@ fn benchmark_delta_generation(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("xxhash3", size), &size, |b, _| {
             b.iter_batched(
                 || (signatures.clone(), modified.clone()),
-                |(sigs, data)| rsync.generate_delta(&sigs, &data[..]).unwrap(),
+                |(sigs, data)| generate_delta(&sigs, &data[..]).unwrap(),
                 criterion::BatchSize::LargeInput,
             );
         });
@@ -121,20 +119,17 @@ fn benchmark_patch_application(c: &mut Criterion) {
 
     for size in sizes {
         let (original, modified) = generate_test_data(size);
-        let rsync = BufferRsync::new(RsyncConfig::default());
 
         group.bench_with_input(BenchmarkId::new("xxhash3", size), &size, |b, _| {
             b.iter_batched(
                 || {
-                    let sigs = rsync.generate_signatures(&original[..]).unwrap();
-                    let delta = rsync.generate_delta(&sigs, &modified[..]).unwrap();
+                    let sigs = generate_signatures(&original[..]).unwrap();
+                    let delta = generate_delta(&sigs, &modified[..]).unwrap();
                     (original.clone(), delta)
                 },
                 |(base, delta)| {
                     let mut result = Vec::new();
-                    rsync
-                        .apply_delta(Cursor::new(&base), &delta, &mut result)
-                        .unwrap();
+                    apply_delta(Cursor::new(&base), &delta, &mut result).unwrap();
                     result
                 },
                 criterion::BatchSize::LargeInput,
@@ -175,18 +170,15 @@ fn benchmark_end_to_end(c: &mut Criterion) {
 
     for size in sizes {
         let (original, modified) = generate_test_data(size);
-        let rsync = BufferRsync::new(RsyncConfig::default());
 
         group.bench_with_input(BenchmarkId::new("xxhash3", size), &size, |b, _| {
             b.iter_batched(
                 || (original.clone(), modified.clone()),
                 |(base, modified)| {
-                    let signatures = rsync.generate_signatures(&base[..]).unwrap();
-                    let delta = rsync.generate_delta(&signatures, &modified[..]).unwrap();
+                    let signatures = generate_signatures(&base[..]).unwrap();
+                    let delta = generate_delta(&signatures, &modified[..]).unwrap();
                     let mut result = Vec::new();
-                    rsync
-                        .apply_delta(Cursor::new(&base), &delta, &mut result)
-                        .unwrap();
+                    apply_delta(Cursor::new(&base), &delta, &mut result).unwrap();
                     result
                 },
                 criterion::BatchSize::LargeInput,
