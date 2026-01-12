@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use librsync::whole::{delta as whole_delta, patch as whole_patch, signature as whole_signature};
 use libsync3::{apply_delta, generate_delta, generate_signatures};
 use std::io::Cursor;

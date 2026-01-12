@@ -2,10 +2,10 @@
 
 pub mod rolling;
 
+use rolling::RollingChecksum;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use twox_hash::XxHash3_128;
-use rolling::RollingChecksum;
 
 /// Reads exactly `buf.len()` bytes or until EOF, returning the number of bytes read.
 fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -28,16 +28,16 @@ fn xxh3_128(chunk: &[u8]) -> u128 {
 
 #[derive(Clone, Debug, Default)]
 pub struct Signatures {
-    weak_to_strong: HashMap<u32, Vec<(u128, usize)>>,
     block_size: usize,
+    weak_to_strong: HashMap<u32, Vec<(u128, usize)>>,
 }
 
 impl Signatures {
     #[must_use]
     pub fn new(block_size: usize) -> Self {
         Self {
-            weak_to_strong: HashMap::new(),
             block_size,
+            weak_to_strong: HashMap::new(),
         }
     }
 
@@ -49,12 +49,16 @@ impl Signatures {
     }
 
     #[must_use]
-    pub fn get(&self, weak: u32, strong: u128) -> Option<usize> {
+    pub fn weak(&self, weak: u32) -> Option<&Vec<(u128, usize)>> {
+        self.weak_to_strong.get(&weak)
+    }
+
+    #[must_use]
+    pub fn from(&self, data: &[u8]) -> Option<usize> {
+        let weak = RollingChecksum::compute(data);
         self.weak_to_strong.get(&weak).and_then(|entries| {
-            entries
-                .iter()
-                .find(|(s, _)| *s == strong)
-                .map(|(_, idx)| *idx)
+            let strong = xxh3_128(data);
+            find_strong_hash(entries, strong)
         })
     }
 
@@ -79,6 +83,58 @@ impl Signatures {
     }
 }
 
+fn find_strong_hash(entries: &[(u128, usize)], strong: u128) -> Option<usize> {
+    entries
+        .iter()
+        .find(|(s, _)| *s == strong)
+        .map(|(_, idx)| *idx)
+}
+
+fn flush_pending_data(delta: &mut Vec<DeltaCommand>, pending_data: &mut Vec<u8>) {
+    if !pending_data.is_empty() {
+        delta.push(DeltaCommand::Data(std::mem::take(pending_data)));
+    }
+}
+
+fn push_or_merge_copy(delta: &mut Vec<DeltaCommand>, new_offset: u64, length: usize) {
+    if let Some(DeltaCommand::Copy {
+        offset,
+        length: last_length,
+    }) = delta.last_mut()
+        && *offset + (*last_length as u64) == new_offset
+    {
+        *last_length += length;
+        return;
+    }
+
+    delta.push(DeltaCommand::Copy {
+        offset: new_offset,
+        length,
+    });
+}
+
+fn reset_rolling(
+    rolling: &mut RollingChecksum,
+    window: &[u8],
+    window_start: usize,
+    block_size: usize,
+) {
+    *rolling = RollingChecksum::new();
+    rolling.update(&window[window_start..window_start + block_size]);
+}
+
+fn emit_copy_for_block_idx(
+    delta: &mut Vec<DeltaCommand>,
+    pending_data: &mut Vec<u8>,
+    block_idx: usize,
+    block_size: usize,
+    length: usize,
+) {
+    flush_pending_data(delta, pending_data);
+    let new_offset = (block_idx * block_size) as u64;
+    push_or_merge_copy(delta, new_offset, length);
+}
+
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DeltaCommand {
@@ -100,7 +156,10 @@ pub fn generate_signatures<R: Read>(reader: R) -> std::io::Result<Signatures> {
 ///
 /// # Errors
 /// Returns an error if reading from the reader fails.
-pub fn generate_signatures_with_block_size<R: Read>(mut reader: R, block_size: usize) -> std::io::Result<Signatures> {
+pub fn generate_signatures_with_block_size<R: Read>(
+    mut reader: R,
+    block_size: usize,
+) -> std::io::Result<Signatures> {
     let mut signatures = Signatures::new(block_size);
     let mut buffer = vec![0u8; block_size];
 
@@ -164,9 +223,7 @@ pub fn generate_delta_with_block_size<R: Read>(
     window_len = initial_read;
 
     if initial_read < block_size {
-        let weak = RollingChecksum::compute(&window[..initial_read]);
-        let strong = xxh3_128(&window[..initial_read]);
-        if let Some(block_idx) = old_signatures.get(weak, strong) {
+        if let Some(block_idx) = old_signatures.from(&window[..initial_read]) {
             return Ok(vec![DeltaCommand::Copy {
                 offset: (block_idx * block_size) as u64,
                 length: initial_read,
@@ -183,37 +240,23 @@ pub fn generate_delta_with_block_size<R: Read>(
             let weak = rolling.value();
             let win_end = window_start + block_size;
 
-            if old_signatures.contains_weak(weak) {
+            if let Some(entries) = old_signatures.weak(weak) {
                 let current_window = &window[window_start..win_end];
                 let strong = xxh3_128(current_window);
 
-                if let Some(block_idx) = old_signatures.get(weak, strong) {
-                    if !pending_data.is_empty() {
-                        delta.push(DeltaCommand::Data(std::mem::take(&mut pending_data)));
-                    }
-
-                    let new_offset = (block_idx * block_size) as u64;
-                    if let Some(DeltaCommand::Copy { offset, length }) = delta.last_mut() {
-                        if *offset + (*length as u64) == new_offset {
-                            *length += block_size;
-                        } else {
-                            delta.push(DeltaCommand::Copy {
-                                offset: new_offset,
-                                length: block_size,
-                            });
-                        }
-                    } else {
-                        delta.push(DeltaCommand::Copy {
-                            offset: new_offset,
-                            length: block_size,
-                        });
-                    }
+                if let Some(block_idx) = find_strong_hash(entries, strong) {
+                    emit_copy_for_block_idx(
+                        &mut delta,
+                        &mut pending_data,
+                        block_idx,
+                        block_size,
+                        block_size,
+                    );
 
                     window_start += block_size;
 
                     if window_len - window_start >= block_size {
-                        rolling = RollingChecksum::new();
-                        rolling.update(&window[window_start..window_start + block_size]);
+                        reset_rolling(&mut rolling, &window, window_start, block_size);
                     }
                     continue;
                 }
@@ -245,15 +288,26 @@ pub fn generate_delta_with_block_size<R: Read>(
         window_len += bytes_read;
 
         if old_window_len < block_size && window_len >= block_size {
-            rolling = RollingChecksum::new();
-            rolling.update(&window[window_start..window_start + block_size]);
+            reset_rolling(&mut rolling, &window, window_start, block_size);
         }
     }
 
-    pending_data.extend_from_slice(&window[window_start..window_len]);
-    if !pending_data.is_empty() {
-        delta.push(DeltaCommand::Data(pending_data));
+    let remaining = &window[window_start..window_len];
+    if !remaining.is_empty() {
+        if let Some(block_idx) = old_signatures.from(remaining) {
+            emit_copy_for_block_idx(
+                &mut delta,
+                &mut pending_data,
+                block_idx,
+                block_size,
+                remaining.len(),
+            );
+        } else {
+            pending_data.extend_from_slice(remaining);
+        }
     }
+
+    flush_pending_data(&mut delta, &mut pending_data);
 
     Ok(delta)
 }

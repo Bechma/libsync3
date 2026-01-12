@@ -1,6 +1,6 @@
 use libsync3::{
-    apply_delta, generate_delta, generate_delta_with_block_size, generate_signatures,
-    generate_signatures_with_block_size, DeltaCommand,
+    DeltaCommand, apply_delta, generate_delta, generate_delta_with_block_size, generate_signatures,
+    generate_signatures_with_block_size,
 };
 use std::io::Cursor;
 
@@ -121,7 +121,10 @@ fn test_1mb_with_prepended_byte_rolling_checksum() {
     let mut reconstructed = Vec::new();
     apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
 
-    assert_eq!(reconstructed, modified, "Reconstructed data should match modified");
+    assert_eq!(
+        reconstructed, modified,
+        "Reconstructed data should match modified"
+    );
 }
 
 #[test]
@@ -409,6 +412,31 @@ fn test_partial_last_block() {
 
     let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
     let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+
+    let mut reconstructed = Vec::new();
+    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
+
+    assert_eq!(reconstructed, modified);
+}
+
+#[test]
+fn test_entire_block_removed() {
+    let block_size = 16;
+
+    let original: Vec<u8> = (0..200).collect();
+    let mut modified = original.clone();
+    modified.drain(block_size * 4..block_size * 5);
+
+    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
+    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+
+    assert_eq!(delta.len(), 2);
+    assert!(
+        matches!(&delta[0], DeltaCommand::Copy { offset, length } if *offset == 0 && *length == block_size * 4)
+    );
+    assert!(
+        matches!(&delta[1], DeltaCommand::Copy { offset, length } if *offset == 80 && *length == 120)
+    );
 
     let mut reconstructed = Vec::new();
     apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();

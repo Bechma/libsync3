@@ -1,6 +1,6 @@
-use std::io::Cursor;
-use libsync3::{apply_delta, generate_delta, generate_signatures};
 use librsync::whole::{delta as whole_delta, patch as whole_patch, signature as whole_signature};
+use libsync3::{apply_delta, generate_delta, generate_signatures};
+use std::io::Cursor;
 
 fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
     let mut original = Vec::with_capacity(size);
@@ -20,7 +20,11 @@ fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
 
         let block_start = size / 3;
         let block_size = size.min(500);
-        for byte in modified.iter_mut().take((block_start + block_size).min(size)).skip(block_start) {
+        for byte in modified
+            .iter_mut()
+            .take((block_start + block_size).min(size))
+            .skip(block_start)
+        {
             *byte = 0xFF;
         }
 

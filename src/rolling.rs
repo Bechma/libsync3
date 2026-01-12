@@ -18,7 +18,11 @@ impl RollingChecksum {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { a: 1, b: 0, count: 0 }
+        Self {
+            a: 1,
+            b: 0,
+            count: 0,
+        }
     }
 
     #[inline]
@@ -65,8 +69,8 @@ impl RollingChecksum {
 
 /// Weights for computing `b`: position 0 gets weight `BLOCK_SIZE`, position 31 gets weight 1
 const WEIGHTS: Simd<u32, BLOCK_SIZE> = Simd::from_array([
-    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
-    16, 15, 14, 13, 12, 11, 10,  9,  8,  7,  6,  5,  4,  3,  2,  1,
+    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9,
+    8, 7, 6, 5, 4, 3, 2, 1,
 ]);
 
 #[inline]

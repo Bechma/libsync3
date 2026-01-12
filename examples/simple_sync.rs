@@ -25,6 +25,9 @@ fn main() {
 
     // Verify the result
     assert_eq!(reconstructed, modified);
-    println!("\nReconstructed: {:?}", String::from_utf8_lossy(&reconstructed));
+    println!(
+        "\nReconstructed: {:?}",
+        String::from_utf8_lossy(&reconstructed)
+    );
     println!("Success! Original + Delta = Modified");
 }
