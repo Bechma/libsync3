@@ -27,6 +27,7 @@ fn xxh3_128(chunk: &[u8]) -> u128 {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Signatures {
     block_size: usize,
     weak_to_strong: HashMap<u32, Vec<(u128, usize)>>,
@@ -98,9 +99,9 @@ fn flush_pending_data(delta: &mut Vec<DeltaCommand>, pending_data: &mut Vec<u8>)
 
 fn push_or_merge_copy(delta: &mut Vec<DeltaCommand>, new_offset: u64, length: usize) {
     if let Some(DeltaCommand::Copy {
-        offset,
-        length: last_length,
-    }) = delta.last_mut()
+                    offset,
+                    length: last_length,
+                }) = delta.last_mut()
         && *offset + (*last_length as u64) == new_offset
     {
         *last_length += length;
