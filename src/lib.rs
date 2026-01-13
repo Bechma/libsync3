@@ -186,28 +186,9 @@ pub fn generate_signatures_with_block_size<R: Read>(
 /// Returns an error if reading from the reader fails.
 pub fn generate_delta<R: Read>(
     old_signatures: &Signatures,
-    reader: R,
-) -> std::io::Result<Vec<DeltaCommand>> {
-    generate_delta_with_block_size(old_signatures, reader, DEFAULT_BLOCK_SIZE)
-}
-
-/// Generate delta from signatures and a reader containing new data.
-/// Uses a rolling checksum to efficiently find matching blocks at any offset.
-/// Reads data in chunks to avoid loading the entire input into memory.
-///
-/// # Errors
-/// Returns an error if reading from the reader fails or if `block_size` does not match `old_signatures.block_size()`.
-pub fn generate_delta_with_block_size<R: Read>(
-    old_signatures: &Signatures,
     mut reader: R,
-    block_size: usize,
 ) -> std::io::Result<Vec<DeltaCommand>> {
-    if old_signatures.block_size() != block_size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "block_size does not match signatures",
-        ));
-    }
+    let block_size = old_signatures.block_size();
 
     let mut delta = Vec::new();
     let mut pending_data: Vec<u8> = Vec::new();

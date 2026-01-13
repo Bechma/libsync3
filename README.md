@@ -2,13 +2,12 @@
 
 A simple, pure Rust implementation of the rsync algorithm using xxhash3 for hashing.
 
-This library allows you to efficiently synchronize files by calculating the differences (delta) between two versions of
-a file and applying those differences to update the old version.
+This library allows you to efficiently calculate the differences (delta) between two versions of
+a file or array of bytes and applying those differences to update the old version.
 
-## Features
-
-- **xxhash3 Hashing**: Uses the extremely fast xxhash3 hash function for both rolling and strong checksums.
 - **Pure Rust**: No external C dependencies.
+- **Portable SIMD**: Uses Adler32 with portable SIMD for fast rolling checksums.
+- **xxhash3 Hashing**: Uses the xxhash3 128 bits hash function for strong checksums.
 
 ## Usage
 

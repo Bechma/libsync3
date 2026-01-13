@@ -1,21 +1,45 @@
 use libsync3::{
-    DeltaCommand, apply_delta, generate_delta, generate_delta_with_block_size, generate_signatures,
+    DeltaCommand, apply_delta, generate_delta, generate_signatures,
     generate_signatures_with_block_size,
 };
 use std::io::Cursor;
+
+fn make_delta(original: &[u8], modified: &[u8], block_size: Option<usize>) -> Vec<DeltaCommand> {
+    let signatures = match block_size {
+        Some(block_size) => generate_signatures_with_block_size(original, block_size).unwrap(),
+        None => generate_signatures(original).unwrap(),
+    };
+    generate_delta(&signatures, modified).unwrap()
+}
+
+fn apply_patch(original: &[u8], delta: &[DeltaCommand]) -> Vec<u8> {
+    let mut reconstructed = Vec::new();
+    apply_delta(Cursor::new(original), delta, &mut reconstructed).unwrap();
+    reconstructed
+}
+
+fn roundtrip(
+    original: &[u8],
+    modified: &[u8],
+    block_size: Option<usize>,
+) -> (Vec<DeltaCommand>, Vec<u8>) {
+    let delta = make_delta(original, modified, block_size);
+    let reconstructed = apply_patch(original, &delta);
+    (delta, reconstructed)
+}
+
+fn assert_roundtrip(original: &[u8], modified: &[u8], block_size: Option<usize>) -> Vec<DeltaCommand> {
+    let (delta, reconstructed) = roundtrip(original, modified, block_size);
+    assert_eq!(reconstructed, modified);
+    delta
+}
 
 #[test]
 fn test_basic_rsync() {
     let original = b"Hello, world! This is a test file for rsync.";
     let modified = b"Hello, world! This is a modified test file for rsync.";
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, None);
 }
 
 #[test]
@@ -23,26 +47,14 @@ fn test_handles_insertions() {
     let original = b"ABCDEFGHabcdefgh";
     let modified = b"ABCXYZDEFGHabcdefgh";
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, None);
 }
 
 #[test]
 fn test_unchanged_data() {
     let data = b"Hello, world! This is a test file for rsync.";
 
-    let signatures = generate_signatures(&data[..]).unwrap();
-    let delta = generate_delta(&signatures, &data[..]).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(data), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, data);
+    assert_roundtrip(data, data, None);
 }
 
 #[test]
@@ -50,13 +62,16 @@ fn test_completely_different_data() {
     let original = b"Hello, world!";
     let modified = b"Goodbye, world!";
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
+    assert_roundtrip(original, modified, None);
+}
 
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
+#[test]
+fn test_completely_different_data_with_small_window() {
+    let block_length = 64;
+    let original = b"A".repeat(1024*64);
+    let modified = b"B".repeat(1024*64);
 
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(&original, &modified, Some(block_length));
 }
 
 #[test]
@@ -73,8 +88,7 @@ fn test_1mb_with_prepended_byte_rolling_checksum() {
     modified.push(0xFF);
     modified.extend_from_slice(&original);
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(&original, &modified, Some(block_size));
 
     let data_commands: Vec<_> = delta
         .iter()
@@ -117,14 +131,6 @@ fn test_1mb_with_prepended_byte_rolling_checksum() {
         assert_eq!(data.len(), 1, "Data command should contain only 1 byte");
         assert_eq!(data[0], 0xFF, "Data byte should be 0xFF");
     }
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(
-        reconstructed, modified,
-        "Reconstructed data should match modified"
-    );
 }
 
 #[test]
@@ -132,14 +138,8 @@ fn test_empty_input() {
     let original = b"some data";
     let modified: &[u8] = b"";
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
-
+    let (delta, reconstructed) = roundtrip(original, modified, None);
     assert!(delta.is_empty(), "Delta for empty input should be empty");
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
     assert_eq!(reconstructed, modified);
 }
 
@@ -148,16 +148,10 @@ fn test_empty_original() {
     let original: &[u8] = b"";
     let modified = b"new data";
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
+    let delta = assert_roundtrip(original, modified, None);
 
     assert_eq!(delta.len(), 1, "Should have exactly 1 Data command");
     assert!(matches!(&delta[0], DeltaCommand::Data(d) if d == modified));
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -167,13 +161,7 @@ fn test_data_smaller_than_block_size() {
     let original = b"small";
     let modified = b"small";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, Some(block_size));
 }
 
 #[test]
@@ -184,17 +172,11 @@ fn test_append_data() {
     let mut modified = original.to_vec();
     modified.extend_from_slice(b"GHIJKLMN");
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(original, &modified, Some(block_size));
 
     assert_eq!(delta.len(), 2, "Should have Copy + Data commands");
     assert!(matches!(&delta[0], DeltaCommand::Copy { .. }));
     assert!(matches!(&delta[1], DeltaCommand::Data(d) if d == b"GHIJKLMN"));
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -205,17 +187,11 @@ fn test_prepend_data() {
     let mut modified = b"PREFIX__".to_vec();
     modified.extend_from_slice(original);
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(original, &modified, Some(block_size));
 
     assert_eq!(delta.len(), 2, "Should have Data + Copy commands");
     assert!(matches!(&delta[0], DeltaCommand::Data(d) if d == b"PREFIX__"));
     assert!(matches!(&delta[1], DeltaCommand::Copy { .. }));
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -225,13 +201,7 @@ fn test_insert_in_middle() {
     let original = b"AAAAAAAABBBBBBBB";
     let modified = b"AAAAAAAAXXXXBBBBBBBB";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, Some(block_size));
 }
 
 #[test]
@@ -241,13 +211,7 @@ fn test_delete_from_middle() {
     let original = b"AAAAAAAAXXXXXXXXBBBBBBBB";
     let modified = b"AAAAAAAABBBBBBBB";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, Some(block_size));
 }
 
 #[test]
@@ -257,13 +221,7 @@ fn test_block_reordering() {
     let original = b"AAAAAAAABBBBBBBBCCCCCCCC";
     let modified = b"CCCCCCCCAAAAAAAABBBBBBBB";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, Some(block_size));
 }
 
 #[test]
@@ -273,13 +231,7 @@ fn test_duplicate_blocks() {
     let original = b"AAAAAAAABBBBBBBB";
     let modified = b"AAAAAAAAAAAAAAAABBBBBBBBBBBBBBBB";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(original, modified, Some(block_size));
 }
 
 #[test]
@@ -289,8 +241,7 @@ fn test_adjacent_copy_compression() {
     let original = b"AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD";
     let modified = original;
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(original, modified, Some(block_size));
 
     assert_eq!(
         delta.len(),
@@ -304,11 +255,6 @@ fn test_adjacent_copy_compression() {
     } else {
         panic!("Expected Copy command");
     }
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -318,19 +264,13 @@ fn test_non_adjacent_blocks_not_compressed() {
     let original = b"AAAAAAAABBBBBBBBCCCCCCCC";
     let modified = b"AAAAAAAACCCCCCCC";
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(original, modified, Some(block_size));
 
     assert_eq!(
         delta.len(),
         2,
         "Non-adjacent blocks should remain separate Copy commands"
     );
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -349,13 +289,7 @@ fn test_large_random_modifications() {
     modified.splice(2000..2000, vec![0xAA; 100]);
     modified.drain(5000..5050);
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(&original, &modified, Some(block_size));
 }
 
 #[test]
@@ -369,13 +303,7 @@ fn test_single_byte_changes() {
     modified[32] = 255;
     modified[48] = 255;
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(&original, &modified, Some(block_size));
 }
 
 #[test]
@@ -385,8 +313,7 @@ fn test_exact_block_boundary() {
     let original: Vec<u8> = (0..48).collect();
     let modified = original.clone();
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(&original, &modified, Some(block_size));
 
     assert_eq!(delta.len(), 1, "Should be single compressed Copy");
 
@@ -396,11 +323,6 @@ fn test_exact_block_boundary() {
     } else {
         panic!("Expected Copy command");
     }
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }
 
 #[test]
@@ -410,13 +332,7 @@ fn test_partial_last_block() {
     let original: Vec<u8> = (0..50).collect();
     let modified = original.clone();
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
+    assert_roundtrip(&original, &modified, Some(block_size));
 }
 
 #[test]
@@ -427,8 +343,7 @@ fn test_entire_block_removed() {
     let mut modified = original.clone();
     modified.drain(block_size * 4..block_size * 5);
 
-    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
-    let delta = generate_delta_with_block_size(&signatures, &modified[..], block_size).unwrap();
+    let delta = assert_roundtrip(&original, &modified, Some(block_size));
 
     assert_eq!(delta.len(), 2);
     assert!(
@@ -437,9 +352,4 @@ fn test_entire_block_removed() {
     assert!(
         matches!(&delta[1], DeltaCommand::Copy { offset, length } if *offset == 80 && *length == 120)
     );
-
-    let mut reconstructed = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
-
-    assert_eq!(reconstructed, modified);
 }

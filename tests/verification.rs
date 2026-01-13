@@ -2,6 +2,38 @@ use librsync::whole::{delta as whole_delta, patch as whole_patch, signature as w
 use libsync3::{apply_delta, generate_delta, generate_signatures};
 use std::io::Cursor;
 
+fn libsync3_roundtrip(original: &[u8], modified: &[u8]) -> Vec<u8> {
+    let signatures = generate_signatures(original).unwrap();
+    let delta = generate_delta(&signatures, modified).unwrap();
+
+    let mut result = Vec::new();
+    apply_delta(Cursor::new(original), &delta, &mut result).unwrap();
+    result
+}
+
+fn librsync_roundtrip(original: &[u8], modified: &[u8]) -> Vec<u8> {
+    let mut sig = Vec::new();
+    whole_signature(&mut Cursor::new(original), &mut sig).unwrap();
+
+    let mut librsync_delta = Vec::new();
+    whole_delta(
+        &mut Cursor::new(modified),
+        &mut Cursor::new(&sig),
+        &mut librsync_delta,
+    )
+    .unwrap();
+
+    let mut librsync_result = Vec::new();
+    whole_patch(
+        &mut Cursor::new(original),
+        &mut Cursor::new(&librsync_delta),
+        &mut librsync_result,
+    )
+    .unwrap();
+
+    librsync_result
+}
+
 fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
     let mut original = Vec::with_capacity(size);
 
@@ -46,24 +78,8 @@ fn generate_test_data(size: usize) -> (Vec<u8>, Vec<u8>) {
 fn verify_correctness() {
     let (original, modified) = generate_test_data(50_000);
 
-    let signatures = generate_signatures(&original[..]).unwrap();
-    let delta = generate_delta(&signatures, &modified[..]).unwrap();
-    let mut result = Vec::new();
-    apply_delta(Cursor::new(&original), &delta, &mut result).unwrap();
-
-    let mut sig = Vec::new();
-    let mut sig_cursor = Cursor::new(&original);
-    whole_signature(&mut sig_cursor, &mut sig).unwrap();
-
-    let mut librsync_delta = Vec::new();
-    let mut new_cursor = Cursor::new(&modified);
-    let mut sig_cursor2 = Cursor::new(&sig);
-    whole_delta(&mut new_cursor, &mut sig_cursor2, &mut librsync_delta).unwrap();
-
-    let mut librsync_result = Vec::new();
-    let mut base_cursor = Cursor::new(&original);
-    let mut delta_cursor = Cursor::new(&librsync_delta);
-    whole_patch(&mut base_cursor, &mut delta_cursor, &mut librsync_result).unwrap();
+    let result = libsync3_roundtrip(&original, &modified);
+    let librsync_result = librsync_roundtrip(&original, &modified);
 
     assert_eq!(result, modified, "xxhash3 rsync implementation failed");
     assert_eq!(librsync_result, modified, "librsync implementation failed");
