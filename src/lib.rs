@@ -1,5 +1,3 @@
-#![feature(portable_simd)]
-
 pub mod rolling;
 
 use rolling::RollingChecksum;
@@ -22,7 +20,8 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result
 }
 
 #[inline]
-fn xxh3_128(chunk: &[u8]) -> u128 {
+#[must_use]
+pub fn xxh3_128(chunk: &[u8]) -> u128 {
     XxHash3_128::oneshot(chunk)
 }
 
@@ -64,11 +63,6 @@ impl Signatures {
     }
 
     #[must_use]
-    pub fn contains_weak(&self, weak: u32) -> bool {
-        self.weak_to_strong.contains_key(&weak)
-    }
-
-    #[must_use]
     pub fn block_size(&self) -> usize {
         self.block_size
     }
@@ -99,9 +93,9 @@ fn flush_pending_data(delta: &mut Vec<DeltaCommand>, pending_data: &mut Vec<u8>)
 
 fn push_or_merge_copy(delta: &mut Vec<DeltaCommand>, new_offset: u64, length: usize) {
     if let Some(DeltaCommand::Copy {
-                    offset,
-                    length: last_length,
-                }) = delta.last_mut()
+        offset,
+        length: last_length,
+    }) = delta.last_mut()
         && *offset + (*last_length as u64) == new_offset
     {
         *last_length += length;
@@ -163,15 +157,18 @@ pub fn generate_signatures_with_block_size<R: Read>(
 ) -> std::io::Result<Signatures> {
     let mut signatures = Signatures::new(block_size);
     let mut buffer = vec![0u8; block_size];
+    let mut rolling = RollingChecksum::new();
 
     for block_index in 0.. {
+        rolling.reset();
         let bytes_read = read_exact_or_eof(&mut reader, &mut buffer)?;
         if bytes_read == 0 {
             break;
         }
 
         let chunk = &buffer[..bytes_read];
-        let weak = RollingChecksum::compute(chunk);
+        rolling.update(chunk);
+        let weak = rolling.value();
         let strong = xxh3_128(chunk);
         signatures.insert(weak, strong, block_index);
     }

@@ -1,27 +1,25 @@
-use std::simd::prelude::*;
-
 const MOD: u32 = 65521;
-const BLOCK_SIZE: usize = 32; // 256-bit—maps
-#[allow(clippy::cast_possible_truncation)]
-const BLOCK_SIZE_U32: u32 = BLOCK_SIZE as u32;
-const NMAX: usize = 5552;
-const CHUNK_SIZE: usize = (NMAX / BLOCK_SIZE) * BLOCK_SIZE;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct RollingChecksum {
     a: u32,
     b: u32,
-    count: usize,
+    adler32: simd_adler32::imp::Adler32Imp,
+}
+
+impl Default for RollingChecksum {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RollingChecksum {
     #[inline]
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             a: 1,
             b: 0,
-            count: 0,
+            adler32: simd_adler32::imp::get_imp(),
         }
     }
 
@@ -31,26 +29,15 @@ impl RollingChecksum {
         (self.b << 16) | self.a
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     pub fn update(&mut self, data: &[u8]) {
-        let mut a = self.a;
-        let mut b = self.b;
-
-        // Process large chunks, applying modulo only once per chunk
-        for chunk in data.chunks(CHUNK_SIZE) {
-            process_chunk(&mut a, &mut b, chunk);
-            a %= MOD;
-            b %= MOD;
-        }
-
-        self.a = a;
-        self.b = b;
-        self.count += data.len();
+        let (a, b) = (self.adler32)(self.a as u16, self.b as u16, data);
+        (self.a, self.b) = (u32::from(a), u32::from(b));
     }
 
-    #[inline]
-    pub fn roll(&mut self, old_byte: u8, new_byte: u8, window_size: usize) {
-        let old = u32::from(old_byte);
-        let new = u32::from(new_byte);
+    pub const fn roll(&mut self, old_byte: u8, new_byte: u8, window_size: usize) {
+        let old = old_byte as u32;
+        let new = new_byte as u32;
         #[allow(clippy::cast_possible_truncation)]
         let n = window_size as u32;
 
@@ -58,55 +45,14 @@ impl RollingChecksum {
         self.b = (self.b + MOD + self.a - 1 - (n * old % MOD)) % MOD;
     }
 
+    pub const fn reset(&mut self) {
+        (self.a, self.b) = (1, 0);
+    }
+
     #[inline]
     #[must_use]
     pub fn compute(data: &[u8]) -> u32 {
-        let mut checksum = Self::new();
-        checksum.update(data);
-        checksum.value()
-    }
-}
-
-/// Weights for computing `b`: position 0 gets weight `BLOCK_SIZE`, position 31 gets weight 1
-const WEIGHTS: Simd<u32, BLOCK_SIZE> = Simd::from_array([
-    32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9,
-    8, 7, 6, 5, 4, 3, 2, 1,
-]);
-
-#[inline]
-fn process_chunk(a: &mut u32, b: &mut u32, data: &[u8]) {
-    let blocks = data.chunks_exact(BLOCK_SIZE);
-    let remainder = blocks.remainder();
-    #[allow(clippy::cast_possible_truncation)]
-    let block_count = blocks.len() as u32;
-
-    // p tracks prefix sums: initial `a` contributes to each of the N blocks
-    let mut p = *a * block_count;
-    let mut a_vec = Simd::<u32, BLOCK_SIZE>::splat(0);
-    let mut b_acc: u32 = *b;
-
-    for block in blocks {
-        let v: Simd<u8, BLOCK_SIZE> = Simd::from_slice(block);
-        let v32: Simd<u32, BLOCK_SIZE> = v.cast();
-
-        // Accumulate prefix contribution before adding this block's sum
-        p += a_vec.reduce_sum();
-
-        // Accumulate byte sums in vector form
-        a_vec += v32;
-
-        // Weighted sum for b (position-dependent)
-        b_acc += (v32 * WEIGHTS).reduce_sum();
-    }
-
-    // Final reduction
-    *a += a_vec.reduce_sum();
-    *b = b_acc + p * BLOCK_SIZE_U32;
-
-    // Scalar tail for remaining bytes
-    for &byte in remainder {
-        *a += u32::from(byte);
-        *b += *a;
+        simd_adler32::adler32(&data)
     }
 }
 

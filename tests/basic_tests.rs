@@ -28,7 +28,11 @@ fn roundtrip(
     (delta, reconstructed)
 }
 
-fn assert_roundtrip(original: &[u8], modified: &[u8], block_size: Option<usize>) -> Vec<DeltaCommand> {
+fn assert_roundtrip(
+    original: &[u8],
+    modified: &[u8],
+    block_size: Option<usize>,
+) -> Vec<DeltaCommand> {
     let (delta, reconstructed) = roundtrip(original, modified, block_size);
     assert_eq!(reconstructed, modified);
     delta
@@ -68,8 +72,8 @@ fn test_completely_different_data() {
 #[test]
 fn test_completely_different_data_with_small_window() {
     let block_length = 64;
-    let original = b"A".repeat(1024*64);
-    let modified = b"B".repeat(1024*64);
+    let original = b"A".repeat(1024 * 64);
+    let modified = b"B".repeat(1024 * 64);
 
     assert_roundtrip(&original, &modified, Some(block_length));
 }

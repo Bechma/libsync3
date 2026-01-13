@@ -17,6 +17,7 @@ harness = false
 [dependencies]
 twox-hash = { version = "2.1.2", features = ["xxhash3_128", "std"], default-features = false }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
+simd-adler32 = { version = "0.3.8" }
 
 [features]
 serde = ["dep:serde"]
