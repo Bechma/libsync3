@@ -27,9 +27,18 @@ pub fn xxh3_128(chunk: &[u8]) -> u128 {
 
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SignatureStrong {
+    pub strong: u128,
+    pub block_index: usize,
+}
+
+pub type SignatureWeak = u32;
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Signatures {
     block_size: usize,
-    weak_to_strong: HashMap<u32, Vec<(u128, usize)>>,
+    weak_to_strong: HashMap<SignatureWeak, Vec<SignatureStrong>>,
 }
 
 impl Signatures {
@@ -41,15 +50,19 @@ impl Signatures {
         }
     }
 
-    pub fn insert(&mut self, weak: u32, strong: u128, block_index: usize) {
-        self.weak_to_strong
-            .entry(weak)
-            .or_default()
-            .push((strong, block_index));
+    #[inline]
+    pub fn extend(&mut self, new_mapping: HashMap<SignatureWeak, Vec<SignatureStrong>>) {
+        self.weak_to_strong.extend(new_mapping);
     }
 
+    #[inline]
+    pub fn insert(&mut self, weak: SignatureWeak, strong: SignatureStrong) {
+        self.weak_to_strong.entry(weak).or_default().push(strong);
+    }
+
+    #[inline]
     #[must_use]
-    pub fn weak(&self, weak: u32) -> Option<&Vec<(u128, usize)>> {
+    pub fn weak(&self, weak: SignatureWeak) -> Option<&Vec<SignatureStrong>> {
         self.weak_to_strong.get(&weak)
     }
 
@@ -78,11 +91,11 @@ impl Signatures {
     }
 }
 
-fn find_strong_hash(entries: &[(u128, usize)], strong: u128) -> Option<usize> {
+fn find_strong_hash(entries: &[SignatureStrong], strong_hash: u128) -> Option<usize> {
     entries
         .iter()
-        .find(|(s, _)| *s == strong)
-        .map(|(_, idx)| *idx)
+        .find(|SignatureStrong { strong, .. }| *strong == strong_hash)
+        .map(|SignatureStrong { block_index, .. }| *block_index)
 }
 
 fn flush_pending_data(delta: &mut Vec<DeltaCommand>, pending_data: &mut Vec<u8>) {
@@ -114,7 +127,7 @@ fn reset_rolling(
     window_start: usize,
     block_size: usize,
 ) {
-    *rolling = RollingChecksum::new();
+    rolling.reset();
     rolling.update(&window[window_start..window_start + block_size]);
 }
 
@@ -170,7 +183,13 @@ pub fn generate_signatures_with_block_size<R: Read>(
         rolling.update(chunk);
         let weak = rolling.value();
         let strong = xxh3_128(chunk);
-        signatures.insert(weak, strong, block_index);
+        signatures.insert(
+            weak,
+            SignatureStrong {
+                strong,
+                block_index,
+            },
+        );
     }
 
     Ok(signatures)
