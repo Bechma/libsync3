@@ -75,52 +75,81 @@ impl Signatures {
         })
     }
 
+    #[inline]
     #[must_use]
     pub fn block_size(&self) -> usize {
         self.block_size
     }
 
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.weak_to_strong.values().map(Vec::len).sum()
     }
 
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.weak_to_strong.is_empty()
     }
 }
 
+#[inline]
 fn find_strong_hash(entries: &[SignatureStrong], strong_hash: u128) -> Option<usize> {
-    entries
-        .iter()
-        .find(|SignatureStrong { strong, .. }| *strong == strong_hash)
-        .map(|SignatureStrong { block_index, .. }| *block_index)
+    for entry in entries {
+        if entry.strong == strong_hash {
+            return Some(entry.block_index);
+        }
+    }
+    None
 }
 
-fn flush_pending_data(delta: &mut Vec<DeltaCommand>, pending_data: &mut Vec<u8>) {
+#[inline]
+fn flush_pending_data<F: FnMut(DeltaCommand) -> std::io::Result<()>>(
+    last_copy: &mut Option<(u64, usize)>,
+    pending_data: &mut Vec<u8>,
+    cb: &mut F,
+) -> std::io::Result<()> {
     if !pending_data.is_empty() {
-        delta.push(DeltaCommand::Data(std::mem::take(pending_data)));
+        flush_last_copy(last_copy, cb)?;
+        cb(DeltaCommand::Data(std::mem::take(pending_data)))?;
     }
+    Ok(())
 }
 
-fn push_or_merge_copy(delta: &mut Vec<DeltaCommand>, new_offset: u64, length: usize) {
-    if let Some(DeltaCommand::Copy {
-        offset,
-        length: last_length,
-    }) = delta.last_mut()
-        && *offset + (*last_length as u64) == new_offset
-    {
-        *last_length += length;
-        return;
+#[inline]
+fn flush_last_copy<F: FnMut(DeltaCommand) -> std::io::Result<()>>(
+    last_copy: &mut Option<(u64, usize)>,
+    cb: &mut F,
+) -> std::io::Result<()> {
+    if let Some((offset, length)) = last_copy.take() {
+        cb(DeltaCommand::Copy { offset, length })?;
     }
-
-    delta.push(DeltaCommand::Copy {
-        offset: new_offset,
-        length,
-    });
+    Ok(())
 }
 
+#[inline]
+fn push_or_merge_copy<F: FnMut(DeltaCommand) -> std::io::Result<()>>(
+    last_copy: &mut Option<(u64, usize)>,
+    new_offset: u64,
+    length: usize,
+    cb: &mut F,
+) -> std::io::Result<()> {
+    if let Some((offset, last_length)) = last_copy.as_mut() {
+        if *offset + (*last_length as u64) == new_offset {
+            *last_length += length;
+            return Ok(());
+        }
+        cb(DeltaCommand::Copy {
+            offset: *offset,
+            length: *last_length,
+        })?;
+    }
+    *last_copy = Some((new_offset, length));
+    Ok(())
+}
+
+#[inline]
 fn reset_rolling(
     rolling: &mut RollingChecksum,
     window: &[u8],
@@ -131,16 +160,18 @@ fn reset_rolling(
     rolling.update(&window[window_start..window_start + block_size]);
 }
 
-fn emit_copy_for_block_idx(
-    delta: &mut Vec<DeltaCommand>,
+#[inline]
+fn emit_copy_for_block_idx<F: FnMut(DeltaCommand) -> std::io::Result<()>>(
+    last_copy: &mut Option<(u64, usize)>,
     pending_data: &mut Vec<u8>,
     block_idx: usize,
     block_size: usize,
     length: usize,
-) {
-    flush_pending_data(delta, pending_data);
+    cb: &mut F,
+) -> std::io::Result<()> {
+    flush_pending_data(last_copy, pending_data, cb)?;
     let new_offset = (block_idx * block_size) as u64;
-    push_or_merge_copy(delta, new_offset, length);
+    push_or_merge_copy(last_copy, new_offset, length, cb)
 }
 
 #[derive(Debug)]
@@ -203,31 +234,51 @@ pub fn generate_signatures_with_block_size<R: Read>(
 /// Returns an error if reading from the reader fails.
 pub fn generate_delta<R: Read>(
     old_signatures: &Signatures,
-    mut reader: R,
+    reader: R,
 ) -> std::io::Result<Vec<DeltaCommand>> {
-    let block_size = old_signatures.block_size();
+    let mut result = Vec::new();
+    generate_delta_with_cb(old_signatures, reader, |cmd| {
+        result.push(cmd);
+        Ok(())
+    })?;
+    Ok(result)
+}
 
-    let mut delta = Vec::new();
+/// Same as `generate_delta`, but allows for custom callback when a new delta is located.
+///
+/// # Errors
+/// Returns an error if the callback returns an error or if reading from the reader fails.
+pub fn generate_delta_with_cb<R: Read, F: FnMut(DeltaCommand) -> std::io::Result<()>>(
+    old_signatures: &Signatures,
+    mut reader: R,
+    mut cb: F,
+) -> std::io::Result<()> {
+    let block_size = old_signatures.block_size();
+    let buffer_size = block_size * 2;
+
+    let mut last_copy: Option<(u64, usize)> = None;
     let mut pending_data: Vec<u8> = Vec::new();
 
-    let mut window = vec![0u8; block_size * 2];
+    let mut window = vec![0u8; buffer_size];
     let mut window_start = 0;
     let mut window_len;
 
     let initial_read = read_exact_or_eof(&mut reader, &mut window[..block_size])?;
     if initial_read == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     window_len = initial_read;
 
     if initial_read < block_size {
         if let Some(block_idx) = old_signatures.from(&window[..initial_read]) {
-            return Ok(vec![DeltaCommand::Copy {
+            cb(DeltaCommand::Copy {
                 offset: (block_idx * block_size) as u64,
                 length: initial_read,
-            }]);
+            })?;
+            return Ok(());
         }
-        return Ok(vec![DeltaCommand::Data(window[..initial_read].to_vec())]);
+        cb(DeltaCommand::Data(window[..initial_read].to_vec()))?;
+        return Ok(());
     }
 
     let mut rolling = RollingChecksum::new();
@@ -236,20 +287,19 @@ pub fn generate_delta<R: Read>(
     loop {
         while window_len - window_start >= block_size {
             let weak = rolling.value();
-            let win_end = window_start + block_size;
 
             if let Some(entries) = old_signatures.weak(weak) {
-                let current_window = &window[window_start..win_end];
-                let strong = xxh3_128(current_window);
+                let strong = xxh3_128(&window[window_start..window_start + block_size]);
 
                 if let Some(block_idx) = find_strong_hash(entries, strong) {
                     emit_copy_for_block_idx(
-                        &mut delta,
+                        &mut last_copy,
                         &mut pending_data,
                         block_idx,
                         block_size,
                         block_size,
-                    );
+                        &mut cb,
+                    )?;
 
                     window_start += block_size;
 
@@ -260,13 +310,12 @@ pub fn generate_delta<R: Read>(
                 }
             }
 
-            pending_data.push(window[window_start]);
             let old_byte = window[window_start];
+            pending_data.push(old_byte);
             window_start += 1;
 
             if window_len - window_start >= block_size {
-                let new_byte = window[window_start + block_size - 1];
-                rolling.roll(old_byte, new_byte, block_size);
+                rolling.roll(old_byte, window[window_start + block_size - 1], block_size);
             }
         }
 
@@ -277,7 +326,7 @@ pub fn generate_delta<R: Read>(
             window_start = 0;
         }
 
-        let bytes_read = read_exact_or_eof(&mut reader, &mut window[window_len..block_size * 2])?;
+        let bytes_read = read_exact_or_eof(&mut reader, &mut window[window_len..buffer_size])?;
         if bytes_read == 0 {
             break;
         }
@@ -294,20 +343,22 @@ pub fn generate_delta<R: Read>(
     if !remaining.is_empty() {
         if let Some(block_idx) = old_signatures.from(remaining) {
             emit_copy_for_block_idx(
-                &mut delta,
+                &mut last_copy,
                 &mut pending_data,
                 block_idx,
                 block_size,
                 remaining.len(),
-            );
+                &mut cb,
+            )?;
         } else {
             pending_data.extend_from_slice(remaining);
         }
     }
 
-    flush_pending_data(&mut delta, &mut pending_data);
+    flush_pending_data(&mut last_copy, &mut pending_data, &mut cb)?;
+    flush_last_copy(&mut last_copy, &mut cb)?;
 
-    Ok(delta)
+    Ok(())
 }
 
 /// # Errors

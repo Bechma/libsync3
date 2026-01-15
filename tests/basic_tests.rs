@@ -1,5 +1,5 @@
 use libsync3::{
-    DeltaCommand, apply_delta, generate_delta, generate_signatures,
+    DeltaCommand, apply_delta, generate_delta, generate_delta_with_cb, generate_signatures,
     generate_signatures_with_block_size,
 };
 use std::io::Cursor;
@@ -356,4 +356,40 @@ fn test_entire_block_removed() {
     assert!(
         matches!(&delta[1], DeltaCommand::Copy { offset, length } if *offset == 80 && *length == 120)
     );
+}
+
+#[test]
+fn test_generate_delta_with_channel() {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let block_size = 16;
+    let original: Vec<u8> = (0..64).collect();
+    let mut modified = vec![0xFF];
+    modified.extend_from_slice(&original);
+
+    let signatures = generate_signatures_with_block_size(&original[..], block_size).unwrap();
+
+    let (tx, rx) = mpsc::channel::<DeltaCommand>();
+
+    let receiver_handle = thread::spawn(move || {
+        let mut commands = Vec::new();
+        while let Ok(cmd) = rx.recv() {
+            commands.push(cmd);
+        }
+        commands
+    });
+
+    generate_delta_with_cb(&signatures, &modified[..], |cmd| {
+        tx.send(cmd).map_err(std::io::Error::other)
+    })
+    .unwrap();
+
+    drop(tx);
+
+    let delta = receiver_handle.join().unwrap();
+
+    let mut reconstructed = Vec::new();
+    apply_delta(Cursor::new(&original), &delta, &mut reconstructed).unwrap();
+    assert_eq!(reconstructed, modified);
 }

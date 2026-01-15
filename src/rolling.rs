@@ -25,26 +25,34 @@ impl RollingChecksum {
 
     #[inline]
     #[must_use]
-    pub const fn value(&self) -> u32 {
-        (self.b << 16) | self.a
+    pub fn value(&self) -> u32 {
+        (self.b % MOD) << 16 | (self.a % MOD)
     }
 
     #[allow(clippy::cast_possible_truncation)]
+    #[inline]
     pub fn update(&mut self, data: &[u8]) {
         let (a, b) = (self.adler32)(self.a as u16, self.b as u16, data);
         (self.a, self.b) = (u32::from(a), u32::from(b));
     }
 
-    pub const fn roll(&mut self, old_byte: u8, new_byte: u8, window_size: usize) {
-        let old = old_byte as u32;
-        let new = new_byte as u32;
+    #[inline]
+    pub fn roll(&mut self, old_byte: u8, new_byte: u8, window_size: usize) {
+        let old = u32::from(old_byte);
+        let new = u32::from(new_byte);
         #[allow(clippy::cast_possible_truncation)]
         let n = window_size as u32;
 
-        self.a = (self.a + MOD - old + new) % MOD;
-        self.b = (self.b + MOD + self.a - 1 - (n * old % MOD)) % MOD;
+        // Use wrapping arithmetic and defer modulo to value() for better performance
+        self.a = self.a.wrapping_sub(old).wrapping_add(new);
+        self.b = self
+            .b
+            .wrapping_sub(n.wrapping_mul(old))
+            .wrapping_add(self.a)
+            .wrapping_sub(1);
     }
 
+    #[inline]
     pub const fn reset(&mut self) {
         (self.a, self.b) = (1, 0);
     }
