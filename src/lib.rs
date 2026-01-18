@@ -1,6 +1,7 @@
 pub mod rolling;
 
 use rolling::RollingChecksum;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use twox_hash::XxHash3_128;
@@ -363,17 +364,21 @@ pub fn generate_delta_with_cb<R: Read, F: FnMut(DeltaCommand) -> std::io::Result
 
 /// # Errors
 /// Returns an error if the delta contains invalid copy commands (out of bounds or overflow) or if IO operations fail.
-pub fn apply_delta<R: Read + Seek, W: Write>(
+pub fn apply_delta<R: Read + Seek, W: Write, I>(
     mut base_reader: R,
-    delta: &[DeltaCommand],
+    delta: I,
     target_writer: W,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    I: IntoIterator,
+    I::Item: Borrow<DeltaCommand>,
+{
     const BUF_SIZE: usize = 64 * 1024;
     let mut writer = BufWriter::with_capacity(BUF_SIZE, target_writer);
     let mut current_pos: u64 = 0;
 
     for command in delta {
-        match command {
+        match command.borrow() {
             DeltaCommand::Data(data) => {
                 writer.write_all(data)?;
             }
